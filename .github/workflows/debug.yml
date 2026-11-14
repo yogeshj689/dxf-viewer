@@ -1,0 +1,21 @@
+name: Debug DWG schema
+on:
+  push:
+    branches: [debug]
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: |
+          mkdir -p /tmp/ldwg && cd /tmp/ldwg && npm init -y >/dev/null && npm install @mlightcad/libredwg-web --no-audit --no-fund
+          P=/tmp/ldwg/node_modules/@mlightcad/libredwg-web
+          D=/tmp/lib && mkdir -p $D && cp -r $P/dist $P/wasm $P/package.json $D/
+          node $GITHUB_WORKSPACE/tools/make-loader.mjs $D
+          echo "=== DTS FILES"; find $P -name "*.d.ts" | sort
+          for f in $(find $P -path "*database*" -name "*.d.ts" | sort); do echo "=== DTS $f"; grep -vE "^\s*(\*|/\*\*|\*/)" $f | head -150; done
+          mkdir -p /tmp/s && cd /tmp/s
+          for f in example_2000 example_2018 example_r14; do curl -fsSL -o $f.dwg https://raw.githubusercontent.com/LibreDWG/libredwg/master/test/test-data/$f.dwg || true; done
+          node $GITHUB_WORKSPACE/tools/dump-dwg.mjs /tmp/lib /tmp/s/example_2000.dwg /tmp/s/example_2018.dwg /tmp/s/example_r14.dwg
