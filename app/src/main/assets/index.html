@@ -275,7 +275,9 @@ function renderLayers(){
 
 function loadText(text,name){
   if(/^AutoCAD Binary DXF/.test(text.slice(0,22))){ toast('Binary DXF isn’t supported — please save the drawing as ASCII DXF.',4500); return false; }
-  const dxf=parseDXF(text);
+  return loadModel(parseDXF(text),name);
+}
+function loadModel(dxf,name){
   const sc=buildScene(dxf);
   if(!sc.total && !dxf.entities.length){ toast('No drawable entities found in this file.',3500); return false; }
   scene=sc; mPts=[]; snapHit=null; updateMeasure();
@@ -292,7 +294,8 @@ function getLibreDwg(){
     libreDwgP=(async()=>{
       const base=new URL('libredwg/',location.href).href;
       const m=await import(base+'loader.mjs');
-      return await m.LibreDwg.create(base+'wasm/');
+      const lib=await m.LibreDwg.create(base+'wasm/');
+      return {lib, fileType:(m.Dwg_File_Type&&m.Dwg_File_Type.DWG)||0};
     })();
     libreDwgP.catch(()=>{ libreDwgP=null; });
   }
@@ -303,14 +306,14 @@ async function openBytes(buf,name){
   if(isDWG(buf)){
     busy(true,'Converting DWG ('+dwgVersionName(buf)+')…');
     await new Promise(r=>setTimeout(r,30));
-    let lib;
-    try{ lib=await getLibreDwg(); }
+    let L;
+    try{ L=await getLibreDwg(); }
     catch(err){ console.error(err); toast('DWG support could not be loaded on this device: '+err.message,5000); return; }
-    let text;
-    try{ text=dwgToDxfText(lib,buf); }
-    catch(err){ console.error(err); toast('Could not convert this DWG ('+dwgVersionName(buf)+'): '+err.message,5000); return; }
+    let model;
+    try{ model=readDWG(L.lib,L.fileType,buf); }
+    catch(err){ console.error(err); libreDwgP=null; toast('Could not read this DWG ('+dwgVersionName(buf)+'): '+err.message,5000); return; }
     busy(true,'Drawing…'); await new Promise(r=>setTimeout(r,20));
-    loadText(text,name);
+    loadModel(model,name);
     return;
   }
   busy(true,'Reading drawing…'); await new Promise(r=>setTimeout(r,20));

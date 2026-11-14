@@ -295,9 +295,9 @@ function buildScene(dxf){
         if(blk && depth<16) for(const be of blk.entities) emit(be, M, lname, color, depth+1);
         break; }
       case 'HATCH': {
-        const loops=parseHatch(e);
+        const loops=e.loops||parseHatch(e);
         fill(loops, num(e,70,0)===1 ? 0.55 : 0.18); break; }
-      case 'ATTDEF': case 'VIEWPORT': case 'SEQEND': break;
+      case 'ATTDEF': case 'VIEWPORT': case 'SEQEND': case 'XLINE': case 'RAY': case 'WIPEOUT': case 'VERTEX': break;
       default: unsupported[e.type]=(unsupported[e.type]||0)+1;
     }
   }
@@ -382,10 +382,136 @@ function decodeText(buf){
   if(text.includes('�')) text=new TextDecoder('windows-1252').decode(buf);
   return text;
 }
-// lib = LibreDwg instance from @mlightcad/libredwg-web
-function dwgToDxfText(lib,buf){
+/* ============================== DWG -> internal model ==============================
+ * LibreDWG (WebAssembly) reads the DWG and returns a JSON "DwgDatabase". We translate it into the
+ * same {layers, blocks, entities} model that parseDXF() produces, so DWG and DXF share one renderer.
+ */
+function readDWG(lib, dwgFileType, buf){
   const ab=buf.buffer.slice(buf.byteOffset,buf.byteOffset+buf.byteLength);
-  const out=lib.dwg_write_dxf(ab);
-  if(!out||!out.length) throw new Error('converter returned no data');
-  return decodeText(out instanceof Uint8Array?out:new Uint8Array(out));
+  const ptr=lib.dwg_read_data(ab, dwgFileType);
+  if(ptr===undefined||ptr===null||ptr===0) throw new Error('the DWG reader could not open this file');
+  let db;
+  try{ db=lib.convert(ptr); }
+  finally{ try{ lib.dwg_free(ptr); }catch(_){ } }
+  return dwgDbToModel(db);
+}
+function dwgDbToModel(db){
+  const R2D=180/Math.PI;
+  const out={layers:{}, blocks:{}, entities:[], header:{}};
+  const T=db.tables||{};
+  const ents=(t)=>(t&&(t.entries||t))||[];
+  for(const L of ents(T.LAYER)){
+    const ci=typeof L.colorIndex==='number'?L.colorIndex:7;
+    out.layers[L.name]={name:L.name, aci:Math.abs(ci)||7, tc:null, visible: ci>=0 && !L.off && !L.frozen};
+  }
+  const byHandle={};
+  for(const B of ents(T.BLOCK_RECORD)) if(B.handle) byHandle[B.handle]=B.name;
+  try{ const u=db.header&&db.header.INSUNITS; if(typeof u==='number') out.header.units=u; }catch(_){}
+
+  const P=(p)=>p||{x:0,y:0,z:0};
+  function mk(src,type,pairs){
+    const e={type, c:pairs, f:{}};
+    for(const pr of pairs) if(!(pr[0] in e.f)) e.f[pr[0]]=pr[1];
+    e.layer=(src&&src.layer)||'0';
+    const ci=src&&src.colorIndex;
+    if(typeof ci==='number' && ci>=0 && ci<=256) e.color=ci;
+    else if(src && typeof src.color==='number' && src.color>=0){ e.color=256; e.tc=src.color; }
+    else e.color=256;
+    return e;
+  }
+  const ez=(o)=>{ const d=o&&(o.extrusionDirection||o.normal); return (d&&typeof d.z==='number'&&d.z<0)?-1:1; };
+  function textPairs(src,t,type){
+    const sp=P(t.startPoint), ep=P(t.endPoint);
+    return mk(src,type,[[1,String(t.text||'')],[10,sp.x],[20,sp.y],[11,ep.x],[21,ep.y],[40,t.textHeight||1],
+      [50,(t.rotation||0)*R2D],[41,t.xScale||1],[72,t.halign||0],[73,t.valign||0],[74,t.valign||0],
+      [70,(src&&src.flags)||0],[230,ez(t)]]);
+  }
+  function hatchLoops(h){
+    const loops=[];
+    for(const bp of (h.boundaryPaths||[])){
+      const pts=[];
+      if(bp.vertices){ polyBulge(bp.vertices.map(v=>[v.x,v.y,v.bulge||0]),true,pts); }
+      else for(const ed of (bp.edges||[])){
+        if(ed.type===1){ pts.push(ed.start.x,ed.start.y,ed.end.x,ed.end.y); }
+        else if(ed.type===2||ed.type===3){
+          let mx,my,ra;
+          if(ed.type===2){ mx=ed.radius; my=0; ra=1; }
+          else { mx=ed.end.x; my=ed.end.y; const len=Math.hypot(mx,my)||1; ra=ed.lengthOfMinorAxis>1.0001?ed.lengthOfMinorAxis/len:ed.lengthOfMinorAxis; }
+          let a0=ed.startAngle||0, a1=ed.endAngle||0;
+          if(ed.isCCW===false){ a0=-a0; a1=-a1; while(a1>=a0) a1-=TAU; } else { while(a1<=a0) a1+=TAU; }
+          ellPts(ed.center.x,ed.center.y,mx,my,ra||1,a0,a1,pts);
+        } else if(ed.type===4){
+          const cp=(ed.controlPoints||[]).map(q=>[q.x,q.y]);
+          const w=(ed.controlPoints||[]).map(q=>q.weight); const hasW=w.every(x=>typeof x==='number');
+          splinePts(cp,ed.knots||[],ed.degree||3,hasW?w:null).forEach(v=>pts.push(v));
+        }
+      }
+      loops.push(pts);
+    }
+    return loops;
+  }
+  function conv(s){
+    if(!s||s.isInPaperSpace) return null;
+    switch(s.type){
+      case 'LINE': return mk(s,'LINE',[[10,P(s.startPoint).x],[20,P(s.startPoint).y],[11,P(s.endPoint).x],[21,P(s.endPoint).y]]);
+      case 'CIRCLE': return mk(s,'CIRCLE',[[10,P(s.center).x],[20,P(s.center).y],[40,s.radius],[230,ez(s)]]);
+      case 'ARC': return mk(s,'ARC',[[10,P(s.center).x],[20,P(s.center).y],[40,s.radius],[50,(s.startAngle||0)*R2D],[51,(s.endAngle||0)*R2D],[230,ez(s)]]);
+      case 'ELLIPSE': return mk(s,'ELLIPSE',[[10,P(s.center).x],[20,P(s.center).y],[11,P(s.majorAxisEndPoint).x],[21,P(s.majorAxisEndPoint).y],
+        [40,s.axisRatio||1],[41,s.startAngle||0],[42,s.endAngle==null?TAU:s.endAngle],[230,ez(s)]]);
+      case 'LWPOLYLINE': {
+        const pr=[[70,(s.flag&512)?1:0],[230,ez(s)]];
+        for(const v of (s.vertices||[])) pr.push([10,v.x],[20,v.y],[42,v.bulge||0]);
+        return mk(s,'LWPOLYLINE',pr); }
+      case 'POLYLINE2D': case 'POLYLINE3D': case 'POLYLINE': {
+        const e=mk(s,'POLYLINE',[[70,s.flag||0],[230,ez(s)]]);
+        e.verts=(s.vertices||[]).map(v=>mk(s,'VERTEX',[[10,v.x],[20,v.y],[42,v.bulge||0],[70,v.flag&16?16:0]]));
+        return e; }
+      case 'SPLINE': {
+        const pr=[[70,s.flag||0],[71,s.degree||3]];
+        (s.knots||[]).forEach(k=>pr.push([40,k]));
+        (s.controlPoints||[]).forEach(q=>pr.push([10,q.x],[20,q.y]));
+        (s.weights||[]).forEach(w=>pr.push([41,w]));
+        (s.fitPoints||[]).forEach(q=>pr.push([11,q.x],[21,q.y]));
+        return mk(s,'SPLINE',pr); }
+      case 'TEXT': return textPairs(s,s,'TEXT');
+      case 'ATTRIB': {
+        if(s.flags&1) return null;
+        const t=s.text&&typeof s.text==='object'?s.text:s;
+        return textPairs(s,t,'ATTRIB'); }
+      case 'MTEXT': {
+        const ip=P(s.insertionPoint), d=s.direction;
+        const pr=[[1,String(s.text||'')],[10,ip.x],[20,ip.y],[40,s.textHeight||1],[71,s.attachmentPoint||1],[50,(s.rotation||0)*R2D]];
+        if(d&&(d.x||d.y)) pr.push([11,d.x],[21,d.y]);
+        return mk(s,'MTEXT',pr); }
+      case 'INSERT': {
+        const ip=P(s.insertionPoint);
+        const e=mk(s,'INSERT',[[2,String(s.name||'')],[10,ip.x],[20,ip.y],[41,s.xScale||1],[42,s.yScale||1],[50,(s.rotation||0)*R2D],
+          [70,Math.max(1,s.columnCount||1)],[71,Math.max(1,s.rowCount||1)],[44,s.columnSpacing||0],[45,s.rowSpacing||0],[230,ez(s)]]);
+        e.attribs=(s.attribs||[]).map(conv).filter(Boolean);
+        return e; }
+      case 'DIMENSION': return mk(s,'DIMENSION',[[2,String(s.name||'')]]);
+      case 'ACAD_TABLE': { const nm=byHandle[s.blockRecordHandle]; return nm?mk(s,'DIMENSION',[[2,nm]]):null; }
+      case 'SOLID': case 'TRACE': {
+        const k=[s.corner1,s.corner2,s.corner3,s.corner4||s.corner3].map(P);
+        return mk(s,s.type,[[10,k[0].x],[20,k[0].y],[11,k[1].x],[21,k[1].y],[12,k[2].x],[22,k[2].y],[13,k[3].x],[23,k[3].y],[230,ez(s)]]); }
+      case '3DFACE': {
+        const k=[s.corner1,s.corner2,s.corner3,s.corner4||s.corner3].map(P);
+        return mk(s,'3DFACE',[[10,k[0].x],[20,k[0].y],[11,k[1].x],[21,k[1].y],[12,k[2].x],[22,k[2].y],[13,k[3].x],[23,k[3].y]]); }
+      case 'POINT': return mk(s,'POINT',[[10,P(s.position).x],[20,P(s.position).y]]);
+      case 'LEADER': { const pr=[]; (s.vertices||[]).forEach(q=>pr.push([10,q.x],[20,q.y])); return mk(s,'LEADER',pr); }
+      case 'MLINE': { const pr=[]; (s.vertices||[]).forEach(v=>{ const q=P(v.vertex); pr.push([10,q.x],[20,q.y]); }); return mk(s,'LEADER',pr); }
+      case 'HATCH': { const e=mk(s,'HATCH',[[70,s.solidFill?1:0],[230,ez(s)]]); e.loops=hatchLoops(s); return e; }
+      case 'XLINE': case 'RAY': case 'WIPEOUT': case 'VIEWPORT': case 'ATTDEF': return null;
+      default: return mk(s,s.type,[]);   // reported as "skipped" by buildScene
+    }
+  }
+  const safe=(s)=>{ try{ return conv(s); }catch(err){ return null; } };
+  for(const B of ents(T.BLOCK_RECORD)){
+    if(!B.name || /^\*(Model|Paper)_Space/i.test(B.name)) continue;
+    const bp=P(B.basePoint);
+    out.blocks[B.name]={name:B.name, bx:bp.x||0, by:bp.y||0, entities:(B.entities||[]).filter(e=>e.type!=='ATTRIB').map(safe).filter(Boolean)};
+  }
+  // top-level ATTRIBs are drawn through their INSERT, so skip them here
+  out.entities=(db.entities||[]).filter(e=>e.type!=='ATTRIB').map(safe).filter(Boolean);
+  return out;
 }
