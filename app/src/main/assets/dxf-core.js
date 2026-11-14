@@ -311,6 +311,17 @@ function buildScene(dxf){
   texts.forEach(t=>ext(t.x,t.y)); points.forEach(p=>ext(p.x,p.y));
   if(!isFinite(minX)){ minX=minY=-50; maxX=maxY=50; }
   const ox=(minX+maxX)/2, oy=(minY+maxY)/2;
+  // "Zoom to fit" box that ignores a few far-away stray objects (common in real drawings)
+  let fitBox=[minX,minY,maxX,maxY];
+  { const cx=[],cy=[];
+    for(const p of prims){ const a=p.pts||p.loops[0]; if(a&&a.length>=2){ cx.push(a[0],a[a.length-2]); cy.push(a[1],a[a.length-1]); } }
+    texts.forEach(t=>{cx.push(t.x);cy.push(t.y);});
+    if(cx.length>=20){
+      const q=(arr,f)=>{ const s=arr.filter(isFinite).sort((a,b)=>a-b); return s[Math.min(s.length-1,Math.max(0,Math.floor(f*(s.length-1))))]; };
+      const x0=q(cx,.02),x1=q(cx,.98),y0=q(cy,.02),y1=q(cy,.98);
+      const cw=Math.max(x1-x0,1e-9), ch=Math.max(y1-y0,1e-9), span=Math.max(cw,ch);
+      if((maxX-minX)>span*25 || (maxY-minY)>span*25){ const m=span*0.08; fitBox=[x0-m,y0-m,x1+m,y1+m]; }
+    } }
 
   // group into Path2D batches by layer + colour
   const groups=new Map();
@@ -330,7 +341,7 @@ function buildScene(dxf){
   const fills=[...groups.values()].filter(g=>g.fill).sort((a,b)=>b.fill-a.fill);
   const strokes=[...groups.values()].filter(g=>!g.fill);
   return {fills,strokes,texts,points,snaps,layers,counts,unsupported,total,ox,oy,
-    bbox:[minX-ox,minY-oy,maxX-ox,maxY-oy], units:dxf.header.units};
+    bbox:[fitBox[0]-ox,fitBox[1]-oy,fitBox[2]-ox,fitBox[3]-oy], fullBox:[minX-ox,minY-oy,maxX-ox,maxY-oy], units:dxf.header.units};
 }
 
 function parseHatch(e){
