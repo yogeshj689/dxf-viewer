@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 108dp adaptive icon foreground: a drafting plate with a bore and crosshair -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:strokeColor="#E9ECF1" android:strokeWidth="3" android:fillColor="#00000000"
+        android:pathData="M38,36 L70,36 A6,6 0 0 1 76,42 L76,66 A6,6 0 0 1 70,72 L38,72 A6,6 0 0 1 32,66 L32,42 A6,6 0 0 1 38,36 Z" />
+    <path android:strokeColor="#3D9BFF" android:strokeWidth="3" android:fillColor="#00000000"
+        android:pathData="M54,44 A10,10 0 1 1 53.99,44 Z" />
+    <path android:strokeColor="#FF4D4D" android:strokeWidth="2"
+        android:pathData="M54,38 L54,70 M38,54 L70,54" />
+</vector>
