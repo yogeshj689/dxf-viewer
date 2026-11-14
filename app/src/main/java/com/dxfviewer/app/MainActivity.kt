@@ -12,29 +12,36 @@ import android.view.View
 import android.view.WindowInsets
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import java.nio.ByteBuffer
-import java.nio.charset.CharacterCodingException
-import java.nio.charset.Charset
-import java.nio.charset.CodingErrorAction
-import kotlin.concurrent.thread
+import java.io.ByteArrayInputStream
 
 /**
  * DXF Viewer — a native Android shell around a fast canvas-based DXF renderer
  * (bundled in assets/index.html). Works fully offline.
  *
  *  • "Open" button → system file picker (Downloads, Drive, WhatsApp docs, etc.)
- *  • Opening a .dxf from a file manager / "Open with" / Share → loads directly
+ *  • Opening a .dxf / .dwg from a file manager / "Open with" / Share → loads directly
+ *  • DWG files are converted on-device by LibreDWG (WebAssembly, assets/libredwg)
+ *
+ * Assets and the opened file are served from a virtual https origin so that ES modules and
+ * WebAssembly load correctly (they are blocked on file:// URLs).
  */
 class MainActivity : Activity() {
 
     private lateinit var web: WebView
-    private var pendingText: String? = null
     private var pageReady = false
     private var queuedUri: Uri? = null
+    @Volatile private var currentUri: Uri? = null
+    private var fileSeq = 0
 
-    companion object { private const val PICK_DXF = 4021 }
+    companion object {
+        private const val PICK_DXF = 4021
+        private const val HOST = "appassets.androidplatform.net"
+        private const val ORIGIN = "https://$HOST"
+    }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -47,17 +54,20 @@ class MainActivity : Activity() {
         web.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
-            allowFileAccess = true
+            allowFileAccess = false
             builtInZoomControls = false
             setSupportZoom(false)
         }
-        web.webViewClient = WebViewClient()
+        web.webViewClient = object : WebViewClient() {
+            override fun shouldInterceptRequest(view: WebView, req: WebResourceRequest): WebResourceResponse? =
+                serve(req.url)
+        }
         web.webChromeClient = WebChromeClient()
         web.addJavascriptInterface(Bridge(), "Android")
         setContentView(web)
         applyInsets(web)
 
-        web.loadUrl("file:///android_asset/index.html")
+        web.loadUrl("$ORIGIN/assets/index.html")
         handleIntent(intent)
     }
 
@@ -123,39 +133,54 @@ class MainActivity : Activity() {
         return uri.lastPathSegment?.substringAfterLast('/') ?: "drawing.dxf"
     }
 
-    private fun decode(bytes: ByteArray): String = try {
-        Charsets.UTF_8.newDecoder()
-            .onMalformedInput(CodingErrorAction.REPORT)
-            .onUnmappableCharacter(CodingErrorAction.REPORT)
-            .decode(ByteBuffer.wrap(bytes)).toString()
-    } catch (e: CharacterCodingException) {
-        String(bytes, Charset.forName("windows-1252"))   // older DXFs are ANSI encoded
+    private fun mimeFor(path: String): String = when (path.substringAfterLast('.', "").lowercase()) {
+        "html" -> "text/html"
+        "js", "mjs", "cjs" -> "text/javascript"
+        "wasm" -> "application/wasm"
+        "json", "map" -> "application/json"
+        "css" -> "text/css"
+        "svg" -> "image/svg+xml"
+        "png" -> "image/png"
+        else -> "application/octet-stream"
     }
 
-    private fun loadUri(uri: Uri) {
-        thread {
-            try {
-                val name = displayName(uri)
-                val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                    ?: throw IllegalStateException("Could not open file")
-                pendingText = decode(bytes)
-                runOnUiThread { web.evaluateJavascript("window.onNativeFile(${jsString(name)})", null) }
-            } catch (e: Throwable) {
-                val msg = if (e is OutOfMemoryError) "This file is too large to open on this device."
-                          else "Could not read file: ${e.message}"
-                runOnUiThread { web.evaluateJavascript("window.onNativeError(${jsString(msg)})", null) }
+    /** Serves /assets/... from the APK and /__file/... from the currently opened document. */
+    private fun serve(url: Uri): WebResourceResponse? {
+        if (url.host != HOST) return null
+        val path = url.path ?: return null
+        val headers = mapOf("Access-Control-Allow-Origin" to "*", "Cache-Control" to "no-store")
+        return try {
+            when {
+                path.startsWith("/assets/") -> {
+                    val name = path.removePrefix("/assets/")
+                    WebResourceResponse(mimeFor(name), if (name.endsWith(".wasm")) null else "utf-8",
+                        200, "OK", headers, assets.open(name))
+                }
+                path.startsWith("/__file/") -> {
+                    val uri = currentUri ?: return notFound()
+                    val stream = contentResolver.openInputStream(uri) ?: return notFound()
+                    WebResourceResponse("application/octet-stream", null, 200, "OK", headers, stream)
+                }
+                else -> notFound()
             }
-        }
+        } catch (e: Exception) { notFound() }
+    }
+
+    private fun notFound() = WebResourceResponse("text/plain", "utf-8", 404, "Not Found",
+        mapOf("Access-Control-Allow-Origin" to "*"), ByteArrayInputStream(ByteArray(0)))
+
+    private fun loadUri(uri: Uri) {
+        currentUri = uri
+        val name = displayName(uri)
+        fileSeq++
+        web.evaluateJavascript("window.onNativeFile(${jsString(name)}, ${jsString("$ORIGIN/__file/$fileSeq")})", null)
     }
 
     private fun jsString(s: String): String =
-        "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", " ").replace(" ", " ").replace(" ", " ") + "\""
+        "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", " ").replace("\u2028", " ").replace("\u2029", " ") + "\""
 
     inner class Bridge {
         @JavascriptInterface fun openFile() = runOnUiThread { pickFile() }
-
-        /** Hands the decoded file text to JS once, then frees it. */
-        @JavascriptInterface fun takeText(): String? { val t = pendingText; pendingText = null; return t }
 
         @JavascriptInterface fun ready() = runOnUiThread {
             pageReady = true

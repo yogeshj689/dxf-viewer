@@ -70,7 +70,7 @@ input[type=file]{display:none}
 
 <div class="bar">
   <div class="title"><b id="fname">Sample drawing</b><span id="finfo">Open a .dxf file to view it</span></div>
-  <button class="open" id="openBtn" aria-label="Open DXF file"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>Open</button>
+  <button class="open" id="openBtn" aria-label="Open DXF or DWG file"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>Open</button>
   <button class="btn" id="fitBtn" aria-label="Zoom to fit" title="Zoom to fit"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
   <button class="btn" id="measureBtn" aria-label="Measure" title="Measure distance"><svg viewBox="0 0 24 24"><path d="M3 16.5 16.5 3 21 7.5 7.5 21z"/><path d="M7 13l2 2M10 10l2 2M13 7l2 2"/></svg></button>
   <button class="btn" id="layersBtn" aria-label="Layers" title="Layers"><svg viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/></svg></button>
@@ -89,383 +89,13 @@ input[type=file]{display:none}
 </div>
 
 <div id="toast"></div>
-<div id="loading"><div><span class="spin"></span>Reading drawing…</div></div>
+<div id="loading"><div><span class="spin"></span><span id="loadMsg">Reading drawing…</span></div></div>
 <div id="drop">Drop DXF file to open</div>
 <input type="file" id="file">
 
+<script src="dxf-core.js"></script>
 <script>
 "use strict";
-/* ============================== DXF PARSER ============================== */
-function parseDXF(text){
-  const L = text.split(/\r\n|\r|\n/);
-  const P = [];
-  for(let i=0;i+1<L.length;i+=2){
-    const c = parseInt(L[i], 10);
-    if(isNaN(c)){ i--; continue; }
-    P.push([c, L[i+1].replace(/\s+$/,'')]);
-  }
-  const out = {layers:{}, blocks:{}, entities:[], header:{}};
-  let i = 0;
-  const isZero = (k, v) => P[k] && P[k][0]===0 && P[k][1].trim()===v;
-
-  function readEnt(k){
-    const ent = {type:P[k][1].trim(), c:[], f:{}};
-    k++;
-    while(k<P.length && P[k][0]!==0){
-      const pr=P[k]; ent.c.push(pr);
-      if(!(pr[0] in ent.f)) ent.f[pr[0]] = pr[1];
-      k++;
-    }
-    ent.layer = (ent.f[8]!==undefined ? ent.f[8].trim() : '0') || '0';
-    ent.color = ent.f[62]!==undefined ? parseInt(ent.f[62],10) : 256;
-    if(ent.f[420]!==undefined) ent.tc = parseInt(ent.f[420],10);
-    return [ent, k];
-  }
-  function readEntities(k, list, stops){
-    while(k<P.length){
-      if(P[k][0]!==0){ k++; continue; }
-      const t = P[k][1].trim();
-      if(stops.includes(t) || t==='EOF') return k;
-      let e; [e,k] = readEnt(k);
-      if(e.type==='POLYLINE'){
-        e.verts=[];
-        while(k<P.length && P[k][0]===0 && P[k][1].trim()==='VERTEX'){ let v; [v,k]=readEnt(k); e.verts.push(v); }
-        if(isZero(k,'SEQEND')){ let s; [s,k]=readEnt(k); }
-      } else if(e.type==='INSERT'){
-        e.attribs=[];
-        while(k<P.length && P[k][0]===0 && P[k][1].trim()==='ATTRIB'){ let a; [a,k]=readEnt(k); e.attribs.push(a); }
-        if(isZero(k,'SEQEND')){ let s; [s,k]=readEnt(k); }
-      }
-      list.push(e);
-    }
-    return k;
-  }
-
-  while(i<P.length){
-    if(isZero(i,'SECTION') && P[i+1]){
-      const name = P[i+1][1].trim(); i+=2;
-      if(name==='ENTITIES'){ i = readEntities(i, out.entities, ['ENDSEC']); }
-      else if(name==='TABLES'){
-        while(i<P.length && !isZero(i,'ENDSEC')){
-          if(P[i][0]===0){
-            let e; [e,i]=readEnt(i);
-            if(e.type==='LAYER'){
-              const nm = (e.f[2]||'0').trim();
-              const col = e.f[62]!==undefined ? parseInt(e.f[62],10) : 7;
-              const fl = parseInt(e.f[70]||'0',10);
-              out.layers[nm] = {name:nm, aci:Math.abs(col)||7, tc:e.f[420]!==undefined?parseInt(e.f[420],10):null, visible: col>=0 && !(fl&1)};
-            }
-          } else i++;
-        }
-      }
-      else if(name==='BLOCKS'){
-        while(i<P.length && !isZero(i,'ENDSEC')){
-          if(isZero(i,'BLOCK')){
-            let b; [b,i]=readEnt(i);
-            const blk = {name:(b.f[2]||'').trim(), bx:+b.f[10]||0, by:+b.f[20]||0, entities:[]};
-            i = readEntities(i, blk.entities, ['ENDBLK','ENDSEC']);
-            if(isZero(i,'ENDBLK')){ let x; [x,i]=readEnt(i); }
-            out.blocks[blk.name]=blk;
-          } else i++;
-        }
-      }
-      else if(name==='HEADER'){
-        while(i<P.length && !isZero(i,'ENDSEC')){
-          if(P[i][0]===9 && P[i][1].trim()==='$INSUNITS' && P[i+1]) out.header.units = parseInt(P[i+1][1],10);
-          i++;
-        }
-      }
-      else { while(i<P.length && !isZero(i,'ENDSEC')) i++; }
-    } else i++;
-  }
-  return out;
-}
-
-/* ============================== COLORS ============================== */
-function hsv(h,s,v){
-  const f=(n)=>{const k=(n+h/60)%6; return v - v*s*Math.max(0,Math.min(k,4-k,1));};
-  return rgbHex(f(5)*255,f(3)*255,f(1)*255);
-}
-function rgbHex(r,g,b){ return '#'+[r,g,b].map(x=>Math.round(x).toString(16).padStart(2,'0')).join(''); }
-const ACI_BASE={1:'#ff0000',2:'#ffff00',3:'#00ff00',4:'#00ffff',5:'#0000ff',6:'#ff00ff',7:'FG',8:'#808080',9:'#c0c0c0'};
-function aci(i){
-  i = Math.abs(i);
-  if(ACI_BASE[i]) return ACI_BASE[i];
-  if(i>=250 && i<=255){ const g=[51,91,132,173,214,255][i-250]; return rgbHex(g,g,g); }
-  if(i>=10 && i<=249){
-    const h=Math.floor((i-10)/10)*15, k=i%10;
-    const v=[1,1,.8,.8,.6,.6,.5,.5,.3,.3][k], s=(k%2)?0.5:1;
-    return hsv(h,s,v);
-  }
-  return 'FG';
-}
-const tcHex = n => '#'+(n & 0xffffff).toString(16).padStart(6,'0');
-
-/* ============================== GEOMETRY ============================== */
-const TAU = Math.PI*2, D2R = Math.PI/180;
-const mul=(A,B)=>[A[0]*B[0]+A[2]*B[1], A[1]*B[0]+A[3]*B[1], A[0]*B[2]+A[2]*B[3], A[1]*B[2]+A[3]*B[3], A[0]*B[4]+A[2]*B[5]+A[4], A[1]*B[4]+A[3]*B[5]+A[5]];
-const T=(x,y)=>[1,0,0,1,x,y], S=(x,y)=>[x,0,0,y,0,0], R=(a)=>[Math.cos(a),Math.sin(a),-Math.sin(a),Math.cos(a),0,0];
-const MIRX=[-1,0,0,1,0,0];
-
-function ellPts(cx,cy,mx,my,ratio,t0,t1,out){
-  const nx=-my*ratio, ny=mx*ratio;
-  const sweep=t1-t0, n=Math.max(4, Math.ceil(Math.abs(sweep)/TAU*96));
-  for(let k=0;k<=n;k++){ const t=t0+sweep*k/n, c=Math.cos(t), s=Math.sin(t); out.push(cx+mx*c+nx*s, cy+my*c+ny*s); }
-  return out;
-}
-function bulgeTo(x1,y1,x2,y2,b,out){ // pushes intermediate points (excl. endpoints)
-  const th=4*Math.atan(b), dx=x2-x1, dy=y2-y1, d=Math.hypot(dx,dy);
-  if(d<1e-12) return;
-  const r=d/(2*Math.sin(th/2)), h=r*Math.cos(th/2);
-  const cx=(x1+x2)/2 - dy/d*h, cy=(y1+y2)/2 + dx/d*h;
-  const a0=Math.atan2(y1-cy,x1-cx), rr=Math.abs(r);
-  const n=Math.max(2, Math.ceil(Math.abs(th)/TAU*96));
-  for(let k=1;k<n;k++){ const a=a0+th*k/n; out.push(cx+rr*Math.cos(a), cy+rr*Math.sin(a)); }
-}
-function polyBulge(vs, closed, out){
-  const n=vs.length;
-  for(let k=0;k<n;k++){
-    const v=vs[k]; out.push(v[0],v[1]);
-    const nx = k<n-1 ? vs[k+1] : (closed ? vs[0] : null);
-    if(nx && v[2]) bulgeTo(v[0],v[1],nx[0],nx[1],v[2],out);
-  }
-  if(closed && n>1) out.push(vs[0][0],vs[0][1]);
-  return out;
-}
-function splinePts(ctrl, knots, p, w){
-  const n=ctrl.length, out=[];
-  if(n<2) return out;
-  if(!p || knots.length!==n+p+1){ ctrl.forEach(c=>out.push(c[0],c[1])); return out; }
-  const u0=knots[p], u1=knots[n], steps=Math.min(2000, Math.max(16, n*12));
-  for(let s=0;s<=steps;s++){
-    const u = u0+(u1-u0)*s/steps;
-    let k=p; while(k<n-1 && u>=knots[k+1]) k++;
-    const d=[];
-    for(let j=0;j<=p;j++){ const c=ctrl[j+k-p], ww=w?w[j+k-p]:1; d.push([c[0]*ww,c[1]*ww,ww]); }
-    for(let r=1;r<=p;r++) for(let j=p;j>=r;j--){
-      const den=knots[j+1+k-r]-knots[j+k-p], a = den ? (u-knots[j+k-p])/den : 0;
-      d[j]=[(1-a)*d[j-1][0]+a*d[j][0],(1-a)*d[j-1][1]+a*d[j][1],(1-a)*d[j-1][2]+a*d[j][2]];
-    }
-    out.push(d[p][0]/d[p][2], d[p][1]/d[p][2]);
-  }
-  return out;
-}
-function cleanText(s){
-  return s.replace(/%%[cC]/g,'⌀').replace(/%%[dD]/g,'°').replace(/%%[pP]/g,'±').replace(/%%[uUoOkK]/g,'')
-          .replace(/%%(\d{3})/g,(m,n)=>String.fromCharCode(+n)).replace(/\\U\+([0-9a-fA-F]{4})/g,(m,h)=>String.fromCharCode(parseInt(h,16)));
-}
-function cleanMText(s){
-  s = s.replace(/\\P/g,'\n').replace(/\\U\+([0-9a-fA-F]{4})/g,(m,h)=>String.fromCharCode(parseInt(h,16)))
-       .replace(/\\S([^;]*?)[\^#\/]([^;]*?);/g,'$1/$2')
-       .replace(/\\[ACcFfHhQqTtWwp][^;\\]*;/g,'')
-       .replace(/\\[LlOoKkNX]/g,'').replace(/\\~/g,' ').replace(/[{}]/g,'').replace(/\\\\/g,'\\');
-  return cleanText(s);
-}
-
-/* ============================== SCENE BUILD ============================== */
-let scene=null;
-const OCS = new Set(['ARC','CIRCLE','LWPOLYLINE','POLYLINE','INSERT','TEXT','ATTRIB','SOLID','TRACE','HATCH']);
-
-function buildScene(dxf){
-  const prims=[], texts=[], points=[], snaps=[], layers=dxf.layers, counts={}, unsupported={};
-  let total=0;
-  const num=(e,c,d)=>{ const v=e.f[c]; if(v===undefined) return d; const x=parseFloat(v); return isNaN(x)?d:x; };
-  const getLayer=(nm)=>{ if(!layers[nm]) layers[nm]={name:nm,aci:7,tc:null,visible:true}; return layers[nm]; };
-  const layerColor=(L)=> L.tc!=null ? tcHex(L.tc) : aci(L.aci);
-  const tp=(M,x,y)=>[M[0]*x+M[2]*y+M[4], M[1]*x+M[3]*y+M[5]];
-  const xf=(M,pts)=>{ const o=new Array(pts.length); for(let k=0;k<pts.length;k+=2){ o[k]=M[0]*pts[k]+M[2]*pts[k+1]+M[4]; o[k+1]=M[1]*pts[k]+M[3]*pts[k+1]+M[5]; } return o; };
-  const snap=(M,x,y)=>{ const q=tp(M,x,y); snaps.push(q[0],q[1]); };
-
-  function emit(e, M, pLayer, pColor, depth){
-    const lname = (e.layer==='0' && pLayer!=null) ? pLayer : e.layer;
-    const L = getLayer(lname);
-    let color;
-    if(e.tc!==undefined && !isNaN(e.tc)) color=tcHex(e.tc);
-    else if(e.color===256 || isNaN(e.color)) color=layerColor(L);
-    else if(e.color===0) color = pColor || 'FG';
-    else color=aci(e.color);
-    if(depth===0){ counts[lname]=(counts[lname]||0)+1; total++; }
-    const Mo = (OCS.has(e.type) && num(e,230,1)<0) ? mul(M,MIRX) : M;
-    const line=(pts,closed)=>{ if(pts.length>=4) prims.push({L:lname,C:color,pts:xf(Mo,pts),closed}); };
-    const fill=(loops,alpha)=>{ const ls=loops.filter(l=>l.length>=6).map(l=>xf(Mo,l)); if(ls.length) prims.push({L:lname,C:color,loops:ls,fill:alpha}); };
-
-    switch(e.type){
-      case 'LINE': {
-        const x1=num(e,10,0),y1=num(e,20,0),x2=num(e,11,0),y2=num(e,21,0);
-        line([x1,y1,x2,y2]); snap(Mo,x1,y1); snap(Mo,x2,y2); break; }
-      case 'CIRCLE': {
-        const cx=num(e,10,0),cy=num(e,20,0),r=num(e,40,0);
-        line(ellPts(cx,cy,r,0,1,0,TAU,[]),true); snap(Mo,cx,cy);
-        [0,90,180,270].forEach(a=>snap(Mo,cx+r*Math.cos(a*D2R),cy+r*Math.sin(a*D2R))); break; }
-      case 'ARC': {
-        const cx=num(e,10,0),cy=num(e,20,0),r=num(e,40,0); let a0=num(e,50,0)*D2R, a1=num(e,51,360)*D2R;
-        while(a1<=a0) a1+=TAU;
-        line(ellPts(cx,cy,r,0,1,a0,a1,[])); snap(Mo,cx,cy);
-        snap(Mo,cx+r*Math.cos(a0),cy+r*Math.sin(a0)); snap(Mo,cx+r*Math.cos(a1),cy+r*Math.sin(a1)); break; }
-      case 'ELLIPSE': {
-        const cx=num(e,10,0),cy=num(e,20,0),mx=num(e,11,1),my=num(e,21,0),ra=num(e,40,1);
-        let t0=num(e,41,0), t1=num(e,42,TAU); while(t1<=t0) t1+=TAU;
-        const ME = num(e,230,1)<0 ? mul(M,MIRX) : M;
-        const pts=ellPts(cx,cy,mx,my,ra,t0,t1,[]);
-        prims.push({L:lname,C:color,pts:xf(ME,pts),closed:Math.abs(t1-t0-TAU)<1e-6});
-        snap(ME,cx,cy); break; }
-      case 'LWPOLYLINE': {
-        const vs=[]; for(const [c,v] of e.c){ if(c===10) vs.push([+v,0,0]); else if(c===20&&vs.length) vs[vs.length-1][1]=+v; else if(c===42&&vs.length) vs[vs.length-1][2]=+v; }
-        const closed=!!(num(e,70,0)&1);
-        line(polyBulge(vs,closed,[]),closed); vs.forEach(v=>snap(Mo,v[0],v[1])); break; }
-      case 'POLYLINE': {
-        const fl=num(e,70,0);
-        if(fl&64){ // polyface mesh
-          const pos=e.verts.filter(v=>!(num(v,70,0)&128)).map(v=>[num(v,10,0),num(v,20,0)]);
-          e.verts.filter(v=>num(v,70,0)&128).forEach(v=>{
-            const idx=[71,72,73,74].map(c=>Math.abs(num(v,c,0))).filter(x=>x>0 && x<=pos.length);
-            const pts=[]; idx.forEach(x=>pts.push(pos[x-1][0],pos[x-1][1])); if(idx.length>1) pts.push(pos[idx[0]-1][0],pos[idx[0]-1][1]);
-            line(pts,true);
-          });
-        } else {
-          const vs=e.verts.filter(v=>!(num(v,70,0)&16)).map(v=>[num(v,10,0),num(v,20,0),num(v,42,0)]);
-          const closed=!!(fl&1);
-          line(polyBulge(vs,closed,[]),closed); vs.forEach(v=>snap(Mo,v[0],v[1]));
-        }
-        break; }
-      case 'SPLINE': {
-        const ctrl=[],fit=[],knots=[],w=[];
-        for(const [c,v] of e.c){
-          if(c===10) ctrl.push([+v,0]); else if(c===20&&ctrl.length) ctrl[ctrl.length-1][1]=+v;
-          else if(c===11) fit.push([+v,0]); else if(c===21&&fit.length) fit[fit.length-1][1]=+v;
-          else if(c===40) knots.push(+v); else if(c===41) w.push(+v);
-        }
-        let pts;
-        if(ctrl.length) pts=splinePts(ctrl,knots,num(e,71,3), w.length===ctrl.length?w:null);
-        else { pts=[]; fit.forEach(f=>pts.push(f[0],f[1])); }
-        line(pts, !!(num(e,70,0)&1));
-        if(pts.length>=2){ snap(M,pts[0],pts[1]); snap(M,pts[pts.length-2],pts[pts.length-1]); }
-        break; }
-      case 'LEADER': {
-        const pts=[]; for(const [c,v] of e.c){ if(c===10) pts.push(+v,0); else if(c===20) pts[pts.length-1]=+v; }
-        line(pts); break; }
-      case 'SOLID': case 'TRACE': {
-        const p=[[10,20],[11,21],[13,23],[12,22]].map(([a,b])=>[num(e,a,0),num(e,b,0)]);
-        const loop=[]; p.forEach(q=>loop.push(q[0],q[1])); fill([loop],1); break; }
-      case '3DFACE': {
-        const pts=[]; [[10,20],[11,21],[12,22],[13,23]].forEach(([a,b])=>pts.push(num(e,a,0),num(e,b,0)));
-        line(pts,true); break; }
-      case 'POINT': { const q=tp(Mo,num(e,10,0),num(e,20,0)); points.push({L:lname,C:color,x:q[0],y:q[1]}); snaps.push(q[0],q[1]); break; }
-      case 'TEXT': case 'ATTRIB': {
-        if(e.type==='ATTRIB' && (num(e,70,0)&1)) break;
-        const str=cleanText(e.f[1]||''); if(!str.trim()) break;
-        const ha=num(e,72,0), va=num(e,e.type==='ATTRIB'?74:73,0);
-        const useAlign = ha!==0 || va!==0;
-        const x = useAlign && e.f[11]!==undefined ? num(e,11,0) : num(e,10,0);
-        const y = useAlign && e.f[21]!==undefined ? num(e,21,0) : num(e,20,0);
-        const q=tp(Mo,x,y), sc=Math.hypot(Mo[2],Mo[3]);
-        texts.push({L:lname,C:color,x:q[0],y:q[1],h:num(e,40,1)*sc,rot:num(e,50,0)*D2R+Math.atan2(Mo[1],Mo[0]),wf:num(e,41,1),
-          lines:[str], align:[ 'left','center','right','center','center','center'][ha]||'left',
-          base:['alphabetic','bottom','middle','top'][va]||'alphabetic'});
-        snaps.push(q[0],q[1]); break; }
-      case 'MTEXT': {
-        let raw=''; for(const [c,v] of e.c){ if(c===3) raw+=v; } raw+=(e.f[1]||'');
-        const str=cleanMText(raw); if(!str.trim()) break;
-        const q=tp(Mo,num(e,10,0),num(e,20,0)), sc=Math.hypot(Mo[2],Mo[3]);
-        let rot = e.f[11]!==undefined ? Math.atan2(num(e,21,0),num(e,11,1)) : num(e,50,0)*D2R;
-        const ap=num(e,71,1);
-        texts.push({L:lname,C:color,x:q[0],y:q[1],h:num(e,40,1)*sc,rot:rot+Math.atan2(Mo[1],Mo[0]),wf:1,lines:str.split('\n'),
-          align:['left','center','right'][(ap-1)%3]||'left', vpos:Math.floor((ap-1)/3), mtext:true});
-        snaps.push(q[0],q[1]); break; }
-      case 'INSERT': {
-        const blk=dxf.blocks[(e.f[2]||'').trim()];
-        if(blk && depth<16){
-          const ix=num(e,10,0),iy=num(e,20,0),sx=num(e,41,1),sy=num(e,42,1),rot=num(e,50,0)*D2R;
-          const cols=Math.max(1,num(e,70,1)),rows=Math.max(1,num(e,71,1)),cs=num(e,44,0),rs=num(e,45,0);
-          for(let r=0;r<rows&&r<100;r++) for(let c=0;c<cols&&c<100;c++){
-            const Mi=mul(Mo,mul(T(ix,iy),mul(R(rot),mul(T(c*cs,r*rs),mul(S(sx,sy),T(-blk.bx,-blk.by))))));
-            for(const be of blk.entities) emit(be, Mi, lname, color, depth+1);
-          }
-          snap(Mo,ix,iy);
-        }
-        (e.attribs||[]).forEach(a=>emit(a, M, lname, color, depth+1));
-        break; }
-      case 'DIMENSION': {
-        const blk=dxf.blocks[(e.f[2]||'').trim()];
-        if(blk && depth<16) for(const be of blk.entities) emit(be, M, lname, color, depth+1);
-        break; }
-      case 'HATCH': {
-        const loops=parseHatch(e);
-        fill(loops, num(e,70,0)===1 ? 0.55 : 0.18); break; }
-      case 'ATTDEF': case 'VIEWPORT': case 'SEQEND': break;
-      default: unsupported[e.type]=(unsupported[e.type]||0)+1;
-    }
-  }
-  const I=[1,0,0,1,0,0];
-  for(const e of dxf.entities) emit(e, I, null, null, 0);
-
-  // extents
-  let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
-  const ext=(x,y)=>{ if(!isFinite(x)||!isFinite(y)) return; if(x<minX)minX=x; if(x>maxX)maxX=x; if(y<minY)minY=y; if(y>maxY)maxY=y; };
-  for(const p of prims){ if(p.pts) for(let k=0;k<p.pts.length;k+=2) ext(p.pts[k],p.pts[k+1]); else p.loops.forEach(l=>{ for(let k=0;k<l.length;k+=2) ext(l[k],l[k+1]); }); }
-  texts.forEach(t=>ext(t.x,t.y)); points.forEach(p=>ext(p.x,p.y));
-  if(!isFinite(minX)){ minX=minY=-50; maxX=maxY=50; }
-  const ox=(minX+maxX)/2, oy=(minY+maxY)/2;
-
-  // group into Path2D batches by layer + colour
-  const groups=new Map();
-  const grp=(L,C,fill)=>{ const k=L+'\u0000'+C+'\u0000'+fill; let g=groups.get(k); if(!g){ g={L,C,fill,path:new Path2D()}; groups.set(k,g);} return g; };
-  for(const p of prims){
-    if(p.pts){
-      const g=grp(p.L,p.C,0), a=p.pts;
-      g.path.moveTo(a[0]-ox,a[1]-oy); for(let k=2;k<a.length;k+=2) g.path.lineTo(a[k]-ox,a[k+1]-oy);
-      if(p.closed) g.path.closePath();
-    } else {
-      const g=grp(p.L,p.C,p.fill);
-      p.loops.forEach(a=>{ g.path.moveTo(a[0]-ox,a[1]-oy); for(let k=2;k<a.length;k+=2) g.path.lineTo(a[k]-ox,a[k+1]-oy); g.path.closePath(); });
-    }
-  }
-  texts.forEach(t=>{t.x-=ox;t.y-=oy;}); points.forEach(p=>{p.x-=ox;p.y-=oy;});
-  for(let k=0;k<snaps.length;k+=2){ snaps[k]-=ox; snaps[k+1]-=oy; }
-  const fills=[...groups.values()].filter(g=>g.fill).sort((a,b)=>b.fill-a.fill);
-  const strokes=[...groups.values()].filter(g=>!g.fill);
-  return {fills,strokes,texts,points,snaps,layers,counts,unsupported,total,ox,oy,
-    bbox:[minX-ox,minY-oy,maxX-ox,maxY-oy], units:dxf.header.units};
-}
-
-function parseHatch(e){
-  const c=e.c; let i=0;
-  const find=(code)=>{ while(i<c.length && c[i][0]!==code) i++; if(i>=c.length) return null; return parseFloat(c[i++][1]); };
-  const peek=(code)=> i<c.length && c[i][0]===code;
-  const loops=[], np=find(91); if(np==null) return loops;
-  for(let p=0;p<np;p++){
-    const flags=find(92); if(flags==null) break;
-    const pts=[];
-    if(flags&2){
-      const hasB=find(72), closed=find(73), n=find(93)||0, vs=[];
-      for(let k=0;k<n;k++){ const x=find(10), y=find(20); let b=0; if(hasB && peek(42)){ b=parseFloat(c[i][1]); i++; } vs.push([x,y,b]); }
-      polyBulge(vs,true,pts);
-    } else {
-      const ne=find(93)||0;
-      for(let k=0;k<ne;k++){
-        const t=find(72);
-        if(t===1){ pts.push(find(10),find(20),find(11),find(21)); }
-        else if(t===2||t===3){
-          const cx=find(10),cy=find(20);
-          let mx,my,ra;
-          if(t===2){ mx=find(40); my=0; ra=1; } else { mx=find(11); my=find(21); ra=find(40); }
-          let a0=find(50)*D2R, a1=find(51)*D2R; const ccw=find(73);
-          if(ccw){ while(a1<=a0) a1+=TAU; } else { a0=-a0; a1=-a1; while(a1>=a0) a1-=TAU; }
-          ellPts(cx,cy,mx,my,ra,a0,a1,pts);
-        }
-        else if(t===4){
-          const deg=find(94), rat=find(73); find(74); const nk=find(95)||0, nc=find(96)||0;
-          const kn=[]; for(let q=0;q<nk;q++) kn.push(find(40));
-          const ct=[], w=[]; for(let q=0;q<nc;q++){ ct.push([find(10),find(20)]); if(rat && peek(42)){ w.push(parseFloat(c[i][1])); i++; } }
-          splinePts(ct,kn,deg,w.length===nc?w:null).forEach(v=>pts.push(v));
-        }
-      }
-    }
-    loops.push(pts);
-  }
-  return loops;
-}
-
 /* ============================== VIEW / RENDER ============================== */
 const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
 let W=0,H=0,DPR=1, view={s:1,tx:0,ty:0}, dirty=true, light=false;
@@ -607,16 +237,18 @@ function updateMeasure(){
 /* ============================== UI ============================== */
 function toast(msg,ms=2600){ const t=$('toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(toast._t); toast._t=setTimeout(()=>t.classList.remove('show'),ms); }
 $('openBtn').onclick=()=>{ if(window.Android&&Android.openFile) Android.openFile(); else $('file').click(); };
-// Called by the native app after a file is picked or opened from another app
-window.onNativeFile=function(name){
-  $('loading').style.display='grid';
-  setTimeout(()=>{
-    try{ const t=Android.takeText(); if(t==null||t===''){ toast('That file is empty or could not be read.'); } else loadText(t,name); }
-    catch(err){ console.error(err); toast('Could not parse this DXF: '+err.message,4500); }
-    $('loading').style.display='none';
-  },30);
+function busy(on,msg){ $('loading').style.display=on?'grid':'none'; if(msg) $('loadMsg').textContent=msg; }
+// Called by the native app after a file is picked or opened from another app.
+// The app serves the file at `url` (a virtual same-origin address), so DXF and DWG load the same way.
+window.onNativeFile=async function(name,url){
+  busy(true,'Reading drawing…');
+  try{
+    const r=await fetch(url); if(!r.ok) throw new Error('HTTP '+r.status);
+    await openBytes(new Uint8Array(await r.arrayBuffer()), name);
+  }catch(err){ console.error(err); toast('Could not open this file: '+err.message,4500); }
+  busy(false);
 };
-window.onNativeError=function(msg){ $('loading').style.display='none'; toast(msg,4000); };
+window.onNativeError=function(msg){ busy(false); toast(msg,4000); };
 $('file').onchange=e=>{ const f=e.target.files[0]; if(f) openFile(f); e.target.value=''; };
 $('fitBtn').onclick=fit;
 $('themeBtn').onclick=()=>{ light=!light; document.body.classList.toggle('light',light); document.querySelector('meta[name=theme-color]').content=light?'#f3f4f6':'#0e1014'; dirty=true; };
@@ -653,22 +285,42 @@ function loadText(text,name){
   if(uns.length) toast('Skipped: '+uns.map(([k,v])=>`${k} (${v})`).join(', '),4000);
   renderLayers(); fit(); $('coords').textContent='Tap the drawing for coordinates'; return true;
 }
+// ---- DWG support: LibreDWG compiled to WebAssembly converts DWG -> DXF, then the normal DXF viewer draws it.
+let libreDwgP=null;
+function getLibreDwg(){
+  if(!libreDwgP){
+    libreDwgP=(async()=>{
+      const base=new URL('libredwg/',location.href).href;
+      const m=await import(base+'loader.mjs');
+      return await m.LibreDwg.create(base+'wasm/');
+    })();
+    libreDwgP.catch(()=>{ libreDwgP=null; });
+  }
+  return libreDwgP;
+}
+async function openBytes(buf,name){
+  if(!buf.length){ toast('That file is empty.'); return; }
+  if(isDWG(buf)){
+    busy(true,'Converting DWG ('+dwgVersionName(buf)+')…');
+    await new Promise(r=>setTimeout(r,30));
+    let lib;
+    try{ lib=await getLibreDwg(); }
+    catch(err){ console.error(err); toast('DWG support could not be loaded on this device: '+err.message,5000); return; }
+    let text;
+    try{ text=dwgToDxfText(lib,buf); }
+    catch(err){ console.error(err); toast('Could not convert this DWG ('+dwgVersionName(buf)+'): '+err.message,5000); return; }
+    busy(true,'Drawing…'); await new Promise(r=>setTimeout(r,20));
+    loadText(text,name);
+    return;
+  }
+  busy(true,'Reading drawing…'); await new Promise(r=>setTimeout(r,20));
+  loadText(decodeText(buf),name);
+}
 function openFile(f){
-  $('loading').style.display='grid';
-  const rd=new FileReader();
-  rd.onerror=()=>{ $('loading').style.display='none'; toast('Could not read that file.'); };
-  rd.onload=()=>{
-    setTimeout(()=>{
-      try{
-        const buf=new Uint8Array(rd.result);
-        let text=new TextDecoder('utf-8').decode(buf);
-        if(text.includes('�')) text=new TextDecoder('windows-1252').decode(buf);
-        loadText(text,f.name);
-      }catch(err){ console.error(err); toast('Could not parse this DXF: '+err.message,4500); }
-      $('loading').style.display='none';
-    },30);
-  };
-  rd.readAsArrayBuffer(f);
+  busy(true,'Reading drawing…');
+  f.arrayBuffer().then(ab=>openBytes(new Uint8Array(ab),f.name))
+   .catch(err=>{ console.error(err); toast('Could not open this file: '+err.message,4500); })
+   .finally(()=>busy(false));
 }
 // drag & drop (desktop)
 let dragN=0;
@@ -724,7 +376,7 @@ function sampleDXF(){
   p(0,'TEXT',8,'DIMS',10,128,20,82,40,4,1,'%%c50',72,0);
   // titles
   p(0,'TEXT',8,'TEXT',10,0,20,142,40,8,1,'MOUNTING PLATE  MP-01');
-  p(0,'MTEXT',8,'TEXT',10,0,20,-28,40,3.6,71,1,1,'Sample drawing · tap Open to load your own ASCII .dxf\\PPinch to zoom, drag to pan, double-tap to fit. Units: mm');
+  p(0,'MTEXT',8,'TEXT',10,0,20,-28,40,3.6,71,1,1,'Sample drawing · tap Open to load your own .dxf or .dwg\\PPinch to zoom, drag to pan, double-tap to fit. Units: mm');
   p(0,'POINT',8,'CENTER',10,100,20,60);
   p(0,'ENDSEC',0,'EOF');
   return o.join('\n');
@@ -732,7 +384,7 @@ function sampleDXF(){
 
 resize();
 loadText(sampleDXF(),'Sample drawing');
-$('finfo').textContent='Demo · tap Open to load your .dxf';
+$('finfo').textContent='Demo · tap Open to load a .dxf or .dwg';
 if(window.Android&&Android.ready) Android.ready();
 </script>
 </body>

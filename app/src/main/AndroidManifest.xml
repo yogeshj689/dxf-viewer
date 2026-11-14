@@ -21,7 +21,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- "Open with DXF Viewer" from file managers, email, WhatsApp, Drive… -->
+            <!-- "Open with DXF Viewer" (DXF + DWG) from file managers, email, WhatsApp, Drive… -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -33,10 +33,16 @@
                 <data android:mimeType="application/dxf" />
                 <data android:mimeType="application/x-dxf" />
                 <data android:mimeType="drawing/x-dxf" />
+                <data android:mimeType="image/vnd.dwg" />
+                <data android:mimeType="image/x-dwg" />
+                <data android:mimeType="application/acad" />
+                <data android:mimeType="application/dwg" />
+                <data android:mimeType="application/x-dwg" />
+                <data android:mimeType="application/x-autocad" />
                 <data android:mimeType="application/octet-stream" />
             </intent-filter>
 
-            <!-- Share a .dxf to the app -->
+            <!-- Share a .dxf / .dwg to the app -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -44,6 +50,12 @@
                 <data android:mimeType="image/x-dxf" />
                 <data android:mimeType="application/dxf" />
                 <data android:mimeType="application/x-dxf" />
+                <data android:mimeType="image/vnd.dwg" />
+                <data android:mimeType="image/x-dwg" />
+                <data android:mimeType="application/acad" />
+                <data android:mimeType="application/dwg" />
+                <data android:mimeType="application/x-dwg" />
+                <data android:mimeType="application/x-autocad" />
                 <data android:mimeType="application/octet-stream" />
             </intent-filter>
         </activity>

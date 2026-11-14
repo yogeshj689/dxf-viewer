@@ -12,6 +12,31 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '21' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+
+      # DWG support: LibreDWG compiled to WebAssembly (GPL-3.0), bundled into the app's assets
+      - name: Fetch LibreDWG (DWG reader)
+        run: |
+          mkdir -p /tmp/ldwg && cd /tmp/ldwg && npm init -y >/dev/null
+          npm install @mlightcad/libredwg-web --no-audit --no-fund
+          P=/tmp/ldwg/node_modules/@mlightcad/libredwg-web
+          echo "--- package files"; (cd $P && find . -maxdepth 2 -not -path '*/node_modules*' | sort | head -60)
+          D=$GITHUB_WORKSPACE/app/src/main/assets/libredwg
+          mkdir -p $D && cp -r $P/dist $P/wasm $P/package.json $D/
+          [ -f $P/LICENSE ] && cp $P/LICENSE $D/ || true
+          node $GITHUB_WORKSPACE/tools/make-loader.mjs $D
+          du -sh $D
+
+      - name: Test DWG -> DXF on sample drawings
+        run: |
+          mkdir -p /tmp/samples && cd /tmp/samples
+          for f in example_r14 example_2000 example_2004 example_2007 example_2010 example_2013 example_2018; do
+            curl -fsSL -o $f.dwg https://raw.githubusercontent.com/LibreDWG/libredwg/master/test/test-data/$f.dwg || echo "no $f"
+          done
+          ls -la
+          node $GITHUB_WORKSPACE/tools/test-dwg.mjs $GITHUB_WORKSPACE/app/src/main/assets /tmp/samples/*.dwg
+
       # GitHub's Ubuntu runners ship with the Android SDK preinstalled ($ANDROID_HOME)
       - name: Build release APK
         run: |
@@ -19,15 +44,17 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleRelease --no-daemon --stacktrace
           cp app/build/outputs/apk/release/*.apk DXF-Viewer.apk
+
       - uses: actions/upload-artifact@v4
         with:
           name: DXF-Viewer-apk
           path: DXF-Viewer.apk
+
       - name: Publish as GitHub Release (download on your phone from the Releases page)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "v1.0.${{ github.run_number }}" DXF-Viewer.apk \
-            --title "DXF Viewer v1.0.${{ github.run_number }}" \
-            --notes "Download **DXF-Viewer.apk** below on your Android phone and tap it to install (allow 'Install unknown apps' if asked)." \
+          gh release create "v1.1.${{ github.run_number }}" DXF-Viewer.apk \
+            --title "DXF Viewer v1.1.${{ github.run_number }} — now opens DWG" \
+            --notes "Opens **DXF and DWG** drawings (AutoCAD R13 to 2018+). Download **DXF-Viewer.apk** below on your Android phone and tap it to install." \
             --latest
