@@ -11,16 +11,24 @@ android {
         applicationId = "com.dxfviewer.app"
         minSdk = 24          // Android 7.0+
         targetSdk = 35
-        versionCode = 2
+        versionCode = 3
         versionName = "1.1"
     }
 
+    // Fixed signing key so every new build installs as an update over the previous one.
+    // (Fine for sideloading. For Google Play, create a private key and keep it out of the repo.)
+    signingConfigs {
+        create("release") {
+            storeFile = file("dxfviewer-release.jks")
+            storePassword = "dxfviewer123"
+            keyAlias = "dxfviewer"
+            keyPassword = "dxfviewer123"
+        }
+    }
     buildTypes {
         release {
             isMinifyEnabled = false
-            // Signs release with the debug key so the APK installs straight away.
-            // Replace with your own keystore before publishing to Google Play.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("release")
         }
     }
     compileOptions {
